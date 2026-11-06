@@ -1,3 +1,5 @@
+
+
 <!doctype html>
 <html lang="id" class="h-full">
  <head>
@@ -1058,7 +1060,10 @@
         <p id="pageSubtitle" style="color: #6b7280; font-size: 14px;">Memuat profil sekolah…</p>
        </div>
       </div>
-      <div class="status-badge no-print" id="statusBadge"><span class="status-dot" style="background: #eab308;"></span> <span style="color: #6b7280;">Memuat data...</span>
+      <button class="no-print" onclick="muatUlangDatabase()" title="Perbarui database dari internet" style="border:1px solid #e5e7eb;background:#ffffff;border-radius:10px;padding:8px 12px;cursor:pointer;color:#0f766e;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewbox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+      <span>Perbarui</span></button>
+     <div class="status-badge no-print" id="statusBadge"><span class="status-dot" style="background: #eab308;"></span> <span style="color: #6b7280;">Memuat data...</span>
       </div>
      </header>
     <div class="content-area" id="contentArea"><!-- Home Page -->
@@ -1636,6 +1641,58 @@
     const CSV_SISWA_URL  = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTj9NDKstrj0d9JH7PSMGc4X9ZP1JEarvqoXhF2BZcesqs52oW_jYNKd_fI832uYg/pub?gid=1632329455&single=true&output=csv';
     /* ==================  BATAS PENGATURAN DATABASE  ======================= */
 
+    /* ====================  MODE OFFLINE (V11)  ============================
+       Data terakhir yang berhasil diunduh disimpan di perangkat
+       (localStorage). Bila laptop/HP mati lama atau tidak ada sinyal,
+       aplikasi tetap terbuka dan bisa mencetak surat memakai data terakhir.
+       Catatan agenda surat yang diisi saat offline masuk antrean dan
+       otomatis terkirim ke server begitu ada sinyal.                     */
+    let DB_OFFLINE = false;
+    let _offlineTerakhir = false; // true bila data terakhir diambil dari simpanan perangkat
+    const DB_CACHE = {
+      profil: 'cacheProfilDataQu',
+      siswa: 'cacheSiswaDataQu',
+      guru: 'cacheGuruDataQu',
+      waktu: 'dbTerakhirUpdateDataQu',
+      antre: 'agendaSuratAntre',
+      gambar: 'imgCacheDataQu'
+    };
+    function dbCacheGet(key) { try { return localStorage.getItem(key) || ''; } catch (e) { return ''; } }
+    function dbCacheSet(key, val) { try { localStorage.setItem(key, val); } catch (e) { /* penyimpanan penuh */ } }
+    function dbWaktuSimpan() { dbCacheSet(DB_CACHE.waktu, String(Date.now())); }
+    function dbWaktuBaca() {
+      const t = parseInt(dbCacheGet(DB_CACHE.waktu) || '0', 10);
+      if (!t) return '';
+      const d = new Date(t);
+      return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) + ' pukul ' + d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    }
+    // Simpan gambar kop/ttd/stempel/logo sebagai dataURL agar surat tetap
+    // lengkap saat offline (gambar langsung dari perangkat).
+    function imgCacheBaca() { try { return JSON.parse(dbCacheGet(DB_CACHE.gambar) || '{}'); } catch (e) { return {}; } }
+    function imgCacheSimpan(map) { try { dbCacheSet(DB_CACHE.gambar, JSON.stringify(map)); } catch (e) {} }
+    async function imgCacheUnduh(url) {
+      if (!url || url.startsWith('data:')) return;
+      const map = imgCacheBaca();
+      if (map[url]) return;
+      try {
+        const res = await fetch(url, { cache: 'force-cache' });
+        if (!res.ok) return;
+        const blob = await res.blob();
+        if (!blob || blob.size > 300000) return;
+        const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.onerror = () => r(''); fr.readAsDataURL(blob); });
+        if (dataUrl) { map[url] = dataUrl; imgCacheSimpan(map); }
+      } catch (e) { /* offline: abaikan */ }
+    }
+    function imgCachePakai(url) {
+      if (!url || url.startsWith('data:')) return url;
+      const map = imgCacheBaca();
+      return map[url] || url;
+    }
+    function imgCacheSemua(profil) {
+      return Promise.all([profil.logo, profil.kop, profil.ttd, profil.stempel].map(u => imgCacheUnduh(u)));
+    }
+    /* ==================  BATAS MODE OFFLINE  ============================== */
+
     /* ============ LOADING AWAL (PERSENTASE) ============ */
     let _bootPct = 0, _bootTimer = null;
     function bootPaint() {
@@ -1790,7 +1847,13 @@
       return p.length ? p[p.length > 2 ? p.length - 3 : 0] : PROFIL_DEFAULT.kota;
     }
 
-    async function fetchCSVText(url, label) {
+    async function fetchCSVText(url, label, cacheKey) {
+      // Saat perangkat jelas offline, langsung pakai data tersimpan
+      // (tanpa menunggu percobaan jaringan yang memakan waktu).
+      if (navigator.onLine === false && cacheKey) {
+        const tersimpan = dbCacheGet(cacheKey);
+        if (tersimpan) { DB_OFFLINE = true; _offlineTerakhir = true; return tersimpan; }
+      }
       let lastErr;
       for (let i = 0; i < 3; i++) {
         const ctrl = new AbortController();
@@ -1802,6 +1865,7 @@
           if (!res.ok) throw new Error(label + ' HTTP ' + res.status);
           const txt = await res.text();
           if (!txt || !txt.trim()) throw new Error(label + ' kosong');
+          if (cacheKey) { dbCacheSet(cacheKey, txt); dbWaktuSimpan(); DB_OFFLINE = false; _offlineTerakhir = false; }
           return txt;
         } catch (e) {
           clearTimeout(t);
@@ -1809,12 +1873,18 @@
           if (i < 2) await new Promise(r => setTimeout(r, 1200 * (i + 1)));
         }
       }
+      // Semua percobaan gagal (misal tidak ada sinyal): pakai data terakhir
+      // yang tersimpan di perangkat supaya aplikasi tetap bisa dipakai.
+      if (cacheKey) {
+        const tersimpan = dbCacheGet(cacheKey);
+        if (tersimpan) { DB_OFFLINE = true; _offlineTerakhir = true; return tersimpan; }
+      }
       throw lastErr;
     }
 
     async function loadProfil() {
       try {
-        const rows = parseCSV(await fetchCSVText(CSV_PROFIL_URL, 'Profil'));
+        const rows = parseCSV(await fetchCSVText(CSV_PROFIL_URL, 'Profil', DB_CACHE.profil));
         if (!rows.length) return;
         const h = Object.keys(rows[0]);
         const kKey = h.find(x => /data\s*profil|profil|nama\s*data/i.test(x)) || h[1];
@@ -1836,9 +1906,26 @@
         };
         p.kota = pfKota(p.alamat);
         PROFIL = Object.assign({}, PROFIL_DEFAULT, p);
+        dbCacheSet(DB_CACHE.profil, JSON.stringify(PROFIL));
+        imgCacheSemua(PROFIL).then(() => {
+          PROFIL.logo = imgCachePakai(PROFIL.logo);
+          PROFIL.kop = imgCachePakai(PROFIL.kop);
+          PROFIL.ttd = imgCachePakai(PROFIL.ttd);
+          PROFIL.stempel = imgCachePakai(PROFIL.stempel);
+          applyProfil();
+        });
       } catch (e) {
         console.warn('Profil sekolah gagal dimuat, memakai data bawaan.', e);
+        const tersimpan = dbCacheGet(DB_CACHE.profil);
+        if (tersimpan) {
+          try { PROFIL = Object.assign({}, PROFIL_DEFAULT, JSON.parse(tersimpan)); } catch (_) { /* cache rusak */ }
+        }
       }
+      // Saat offline, gambar kop/ttd/stempel dipakai dari simpanan perangkat
+      PROFIL.logo = imgCachePakai(PROFIL.logo);
+      PROFIL.kop = imgCachePakai(PROFIL.kop);
+      PROFIL.ttd = imgCachePakai(PROFIL.ttd);
+      PROFIL.stempel = imgCachePakai(PROFIL.stempel);
       applyProfil();
     }
 
@@ -1858,7 +1945,7 @@
     async function loadData() {
       try {
         bootSet(8, 'Menghubungkan ke database…');
-        const text = await fetchCSVText(CSV_SISWA_URL, 'Data siswa');
+        const text = await fetchCSVText(CSV_SISWA_URL, 'Data siswa', DB_CACHE.siswa);
         bootSet(38, 'Mengunduh data siswa…');
         bootSet(55, 'Menyusun data siswa…');
         studentsData = parseCSV(text);
@@ -1869,7 +1956,7 @@
         updateStatus(true, studentsData.length);
         renderDashboard();
         loadGuru();
-        bootSet(100, 'Selesai');
+        bootSet(100, DB_OFFLINE ? 'Mode offline — data terakhir' : 'Selesai');
         bootDone();
       } catch (error) {
         console.error('Error:', error);
@@ -1881,10 +1968,13 @@
     function updateStatus(success, count) {
       const badge = document.getElementById('statusBadge');
       if (success) {
+        const warna = DB_OFFLINE ? '#f59e0b' : '#22c55e';
+        const ket = DB_OFFLINE ? `${count} siswa (mode offline)` : `${count} siswa dimuat`;
         badge.innerHTML = `
-          <span class="status-dot" style="background: #22c55e;"></span>
-          <span style="color: #6b7280;">${count} siswa dimuat</span>
+          <span class="status-dot" style="background: ${warna};"></span>
+          <span style="color: #6b7280;">${ket}</span>
         `;
+        badge.title = dbWaktuBaca() ? 'Data terakhir diperbarui: ' + dbWaktuBaca() : '';
       } else {
         badge.innerHTML = `
           <span class="status-dot" style="background: #ef4444;"></span>
@@ -1892,6 +1982,26 @@
         `;
       }
     }
+
+    // Perbarui database manual dari internet lalu sinkronkan agenda surat
+    window.muatUlangDatabase = async function() {
+      showInlineMessage('Memperbarui database…');
+      await loadData();
+      if (typeof agendaSinkron === 'function') agendaSinkron();
+      const t = dbWaktuBaca();
+      showInlineMessage(t ? 'Database diperbarui. Terakhir diunduh: ' + t : 'Database diperbarui');
+    };
+
+    // Saat sinyal kembali: sinkronkan antrean agenda & ambil data baru
+    window.addEventListener('online', () => {
+      DB_OFFLINE = false; _offlineTerakhir = false;
+      if (typeof agendaSinkron === 'function') agendaSinkron();
+      if (studentsData.length) loadData();
+    });
+    window.addEventListener('offline', () => {
+      DB_OFFLINE = true; _offlineTerakhir = true;
+      if (studentsData.length) updateStatus(true, studentsData.length);
+    });
     
     function updateStats() {
       const headers = Object.keys(studentsData[0] || {});
@@ -2761,7 +2871,7 @@
     // 4. AGENDA_API_URL : URL Web App Google Apps Script untuk agenda surat
     //    masuk/keluar (opsional). Kosongkan ('') untuk menyimpan hanya di
     //    perangkat ini (localStorage). Lihat file apps_script_agenda_surat_v3.txt
-    const AGENDA_API_URL = 'https://script.google.com/macros/s/AKfycbw2x-lqhBgmh2J9Z1HSIPuCXCupkqmTbEBF3fcna9R4KZPtpLNYBWk8GRO6i0eY5ZI/exec';
+    const AGENDA_API_URL = '';
 
     // ===== Agenda Surat Masuk & Keluar =====
     let agendaData = [];
@@ -2779,9 +2889,38 @@
     function agendaTandaHapus(r) { agendaTerhapus.push({ waktu: r.waktu, nomor: r.nomor, jenis: r.jenis }); agendaSimpanTerhapus(); }
 
     function agendaLokal() { try { localStorage.setItem('agendaSurat', JSON.stringify(agendaData)); } catch (e) { /* penuh: buang isi surat lama */ agendaData.slice(0, -5).forEach(r => delete r.isi); try { localStorage.setItem('agendaSurat', JSON.stringify(agendaData)); } catch (_) {} } }
+    // ===== Antrean agenda saat offline =====
+    // Bila server tidak terjangkau, kiriman disimpan di perangkat lalu
+    // dikirim otomatis begitu ada sinyal (tanpa menimpa data lama).
+    function agendaAntreBaca() { try { return JSON.parse(dbCacheGet(DB_CACHE.antre) || '[]'); } catch (e) { return []; } }
+    function agendaAntreSimpan(q) { try { dbCacheSet(DB_CACHE.antre, JSON.stringify(q.slice(-300))); } catch (e) {} }
+    async function agendaAntreKosongkan() {
+      if (!AGENDA_API_URL || navigator.onLine === false) return 0;
+      const q = agendaAntreBaca();
+      if (!q.length) return 0;
+      const sisa = [];
+      for (const b of q) {
+        try {
+          await fetch(AGENDA_API_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(b) });
+        } catch (e) { sisa.push(b); }
+      }
+      agendaAntreSimpan(sisa);
+      return q.length - sisa.length;
+    }
+    window.agendaSinkron = async function() {
+      const n = await agendaAntreKosongkan();
+      if (n > 0) showInlineMessage(n + ' catatan agenda tersinkron ke server');
+      if (AGENDA_API_URL && navigator.onLine !== false) agendaMuat();
+      else agendaRender();
+    };
     function agendaKirim(body) {
       if (!AGENDA_API_URL) return;
-      fetch(AGENDA_API_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).catch(() => {});
+      fetch(AGENDA_API_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).catch(() => {
+        const q = agendaAntreBaca();
+        q.push(body);
+        agendaAntreSimpan(q);
+        showInlineMessage('Server belum terjangkau — catatan masuk antrean, otomatis terkirim saat ada sinyal');
+      });
     }
     function agendaSimpan() {
       agendaLokal();
@@ -2792,19 +2931,29 @@
       if (!AGENDA_API_URL) { agendaRender(); return; }
       fetch(AGENDA_API_URL + '?action=all&_=' + Date.now()).then(r => r.json()).then(d => {
         if (!d || !Array.isArray(d.rows)) return;
-        const lokal = new Map(agendaData.map(r => [String(r.waktu), r]));
-        const byNomor = new Map(agendaData.map(r => [(r.nomor || '') + '|' + (r.jenis || ''), r]));
-        agendaData = d.rows.map((r, i) => {
-          // Baris lama (script v1) tidak membawa waktu: cocokkan lewat nomor+jenis,
-          // kalau tetap tidak ada, beri penanda waktu baru agar bisa dihapus.
+        // Baris lama (script v1) tidak membawa waktu: cocokkan lewat nomor+jenis,
+        // kalau tetap tidak ada, beri penanda waktu baru agar bisa dihapus.
+        const server = d.rows.map((r, i) => {
+          const l = agendaData.find(x => String(x.waktu) === String(r.waktu));
           if (!r.waktu || r.waktu === 'undefined') {
-            const l = byNomor.get((r.nomor || '') + '|' + (r.jenis || ''));
-            r.waktu = l && l.waktu ? l.waktu : (Date.now() + i);
-          }
-          const l = lokal.get(String(r.waktu));
-          if (l && l.isi && !r.isi) r.isi = l.isi;
+            const m = agendaData.find(x => (x.nomor || '') + '|' + (x.jenis || '') === (r.nomor || '') + '|' + (r.jenis || ''));
+            r.waktu = m ? m.waktu : (Date.now() + i);
+          } else if (l && l.isi && !r.isi) r.isi = l.isi;
           return r;
         }).filter(r => !agendaSudahDihapus(r));
+        // Hilangkan kembar akibat pengiriman ulang antrean offline
+        const dilihat = new Set();
+        const unik = server.filter(r => {
+          const k = String(r.waktu) + '|' + (r.nomor || '');
+          if (dilihat.has(k)) return false;
+          dilihat.add(k);
+          return true;
+        });
+        // Entri lokal yang belum ada di server (baru dibuat / masih antrean)
+        // TIDAK dibuang — digabung agar data lama dan baru tidak saling hapus.
+        const ada = new Set(unik.map(r => String(r.waktu)));
+        const lokal = agendaData.filter(r => !ada.has(String(r.waktu)));
+        agendaData = unik.concat(lokal);
         agendaLokal(); agendaRender(); agendaRefresh(false);
       }).catch(() => {});
     };
@@ -2820,7 +2969,7 @@
       const buka = !p.classList.contains('hidden');
       document.getElementById('suratForm').classList.add('hidden');
       suratMenuTampil(!buka);
-      if (buka) { agendaRender(); agendaIsiRekap(); agendaMuat(); }
+      if (buka) { agendaRender(); agendaIsiRekap(); agendaSinkron(); }
     };
 
     window.agendaTambah = function() {
@@ -2990,9 +3139,13 @@
     };
     async function loadGuru() {
       try {
-        const t = await fetchCSVText(CSV_GURU_URL, 'Data guru');
+        const t = await fetchCSVText(CSV_GURU_URL, 'Data guru', DB_CACHE.guru);
         guruData = parseCSV(t).filter(g => gNama(g));
-      } catch (e) { console.warn('Data guru gagal dimuat', e); guruData = []; }
+      } catch (e) {
+        console.warn('Data guru gagal dimuat', e);
+        const tersimpan = dbCacheGet(DB_CACHE.guru);
+        guruData = tersimpan ? parseCSV(tersimpan).filter(g => gNama(g)) : [];
+      }
       const sel = document.getElementById('guruFilter');
       if (sel) sel.innerHTML = '<option value="">Semua Penempatan</option>' + [...new Set(guruData.map(gPen).filter(Boolean))].map(v => `<option>${gEsc(v)}</option>`).join('');
       renderGuru();
